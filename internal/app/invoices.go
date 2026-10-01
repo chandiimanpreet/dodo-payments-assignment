@@ -155,6 +155,10 @@ func (a *App) createInvoice(w http.ResponseWriter, r *http.Request, biz uuid.UUI
 			return
 		}
 	}
+	if err := emitEvent(ctx, tx, biz, "invoice.created", map[string]any{"invoice": inv}); err != nil {
+		a.internalErr(w, err)
+		return
+	}
 	if err := tx.Commit(ctx); err != nil {
 		a.internalErr(w, err)
 		return

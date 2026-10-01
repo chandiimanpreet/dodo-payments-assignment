@@ -23,11 +23,13 @@ type App struct {
 	log     *slog.Logger
 	pspURL  string
 	psp     *http.Client  // client for the PSP; its timeout is the 40 s PSP timeout in production
+	hook    *http.Client  // webhook deliveries; 10 s timeout
 	payWait time.Duration // how long /pay waits for the PSP before answering 202 (5 s in production)
 }
 
 func New(db *pgxpool.Pool, log *slog.Logger, pspURL string, payWait, pspTimeout time.Duration) *App {
-	return &App{db: db, log: log, pspURL: pspURL, payWait: payWait, psp: &http.Client{Timeout: pspTimeout}}
+	return &App{db: db, log: log, pspURL: pspURL, payWait: payWait, psp: &http.Client{Timeout: pspTimeout},
+		hook: &http.Client{Timeout: 10 * time.Second}}
 }
 
 // Migrate applies the embedded migrations to the database at dbURL (postgres://...).
@@ -59,6 +61,7 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("POST /invoices/{id}/void", a.authed(a.voidInvoice))
 	mux.HandleFunc("POST /invoices/{id}/mark-uncollectible", a.authed(a.markUncollectible))
 	mux.HandleFunc("POST /invoices/{id}/pay", a.authed(a.pay))
+	mux.HandleFunc("POST /webhook-endpoints", a.authed(a.createWebhookEndpoint))
 	return a.logRequests(mux)
 }
 

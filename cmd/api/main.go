@@ -34,6 +34,7 @@ func run(log *slog.Logger) error {
 	if err := a.SeedIfEmpty(ctx); err != nil {
 		return err
 	}
+	go a.RunWebhookWorker(ctx)
 	log.Info("listening", "addr", ":8080")
 	return http.ListenAndServe(":8080", a.Routes())
 }

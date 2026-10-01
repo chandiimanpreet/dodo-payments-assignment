@@ -320,6 +320,13 @@ func (a *App) finalizeAttempt(ctx context.Context, attemptID, invID, biz uuid.UU
 	if err != nil {
 		return chargeResult{}, err
 	}
+	typ := "invoice.paid"
+	if res.status == "failed" {
+		typ = "invoice.payment_failed"
+	}
+	if err := emitEvent(ctx, tx, biz, typ, map[string]any{"invoice": inv, "attempt": attempt}); err != nil {
+		return chargeResult{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return chargeResult{}, err
 	}
