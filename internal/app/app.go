@@ -62,7 +62,14 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("POST /invoices/{id}/mark-uncollectible", a.authed(a.markUncollectible))
 	mux.HandleFunc("POST /invoices/{id}/pay", a.authed(a.pay))
 	mux.HandleFunc("POST /webhook-endpoints", a.authed(a.createWebhookEndpoint))
-	return a.logRequests(mux)
+	// The mux answers unknown routes in plain text; keep them in the standard error shape.
+	return a.logRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, pattern := mux.Handler(r); pattern == "" {
+			writeErr(w, http.StatusNotFound, "not_found", "no such route")
+			return
+		}
+		mux.ServeHTTP(w, r)
+	}))
 }
 
 // recorder captures the status code and business id for the request log line.
