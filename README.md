@@ -102,6 +102,28 @@ curl -s -X POST localhost:8090/invoices/$INVOICE_ID/pay \
 
 This returns `402` with error code `card_declined`. The invoice stays `OPEN` and can be paid again with a **new** `Idempotency-Key`.
 
+**5. Pay when the provider is slow (timeout)**
+
+The invoice from step 4 is still `OPEN`, so it can be reused. `tok_timeout` makes the mock provider wait 30 seconds before it answers.
+
+```bash
+time curl -s -X POST localhost:8090/invoices/$INVOICE_ID/pay \
+  -H "Authorization: Bearer $KEY" \
+  -H "Idempotency-Key: pay-3" \
+  -d '{"card_token":"tok_timeout"}'
+```
+
+The endpoint does not hang. After about 5 seconds it returns `202` with `{"attempt_id": "…", "status": "pending"}`, and the charge carries on in the background. While it is pending, another `pay`, a `void` or a `mark-uncollectible` on this invoice returns `409 payment_in_progress`.
+
+Wait about 25 seconds, then read the invoice:
+
+```bash
+curl -s localhost:8090/invoices/$INVOICE_ID \
+  -H "Authorization: Bearer $KEY"
+```
+
+It is now `PAID`, and `payment_attempts` shows the attempt as `succeeded`. An `invoice.paid` webhook is delivered as well.
+
 **See the webhooks**
 
 ```bash
@@ -116,7 +138,7 @@ You will see `invoice.created`, `invoice.paid` and `invoice.payment_failed` deli
 |---|---|
 | `tok_insufficient_funds` | `402 insufficient_funds`; invoice stays `OPEN` |
 | `tok_network_error` | `502 psp_unavailable`; invoice stays `OPEN` and payable |
-| `tok_timeout` | `202` after 5 seconds with the attempt `pending`; the invoice becomes `PAID` about 25 seconds later. Check with `GET /invoices/{id}` |
+| `tok_timeout` | `202` after 5 seconds, then `PAID` about 25 seconds later (step 5 above) |
 | anything else | `402 invalid_token` |
 
 ## Verifying a webhook signature
