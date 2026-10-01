@@ -144,6 +144,8 @@ The invoice must be `OPEN` and have no pending attempt. The service records a pe
 | Provider errored or unreachable | `502 psp_unavailable` with `attempt_id`. Invoice stays `OPEN` |
 | Provider has not answered in 5 s | `202` `{ "attempt_id": "…", "status": "pending" }` |
 
+Requests rejected before any charge is attempted: `400` (missing header or `card_token`), `404` (no such invoice), `409 invalid_state_transition` (the invoice is not `OPEN`), `409 payment_in_progress` (another attempt is pending) and `422 idempotency_key_reused`.
+
 After a `202` the charge is still being processed in the background. The invoice cannot be paid, voided or marked uncollectible until it resolves. Get the result from `GET /invoices/{id}` or from the `invoice.paid` / `invoice.payment_failed` webhook.
 
 **Idempotency rules**
