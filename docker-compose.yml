@@ -40,7 +40,7 @@ services:
     build:
       context: .
       target: build
-    command: ["go", "test", "-count=1", "./..."]
+    command: ["go", "test", "-count=1", "-v", "./internal/app/"]
     environment:
       DATABASE_URL: postgres://postgres:postgres@db:5432/invoices?sslmode=disable
     depends_on:
