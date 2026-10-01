@@ -1,0 +1,10 @@
+DROP TABLE webhook_deliveries;
+DROP TABLE events;
+DROP TABLE webhook_endpoints;
+DROP TABLE idempotency_keys;
+DROP TABLE payment_attempts;
+DROP TABLE invoice_line_items;
+DROP TABLE invoices;
+DROP TABLE customers;
+DROP TABLE api_keys;
+DROP TABLE businesses;

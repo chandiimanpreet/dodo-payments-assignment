@@ -1,0 +1,10 @@
+# build output and local files
+/bin/
+*.exe
+*.test
+*.out
+.env
+.DS_Store
+.idea/
+.vscode/
+*.swp
