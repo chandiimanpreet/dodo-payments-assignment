@@ -5,9 +5,40 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"net/http"
+	"strings"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
+
+// authed checks the Bearer API key and passes the owning business id to the handler.
+func (a *App) authed(h func(http.ResponseWriter, *http.Request, uuid.UUID)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		key, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !ok || key == "" {
+			writeErr(w, http.StatusUnauthorized, "unauthorized", "missing or invalid API key")
+			return
+		}
+		hash := sha256.Sum256([]byte(key))
+		var biz uuid.UUID
+		err := a.db.QueryRow(r.Context(),
+			`SELECT business_id FROM api_keys WHERE key_hash = $1 AND revoked_at IS NULL`, hash[:]).Scan(&biz)
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeErr(w, http.StatusUnauthorized, "unauthorized", "missing or invalid API key")
+			return
+		}
+		if err != nil {
+			a.internalErr(w, err)
+			return
+		}
+		if rec, ok := w.(*recorder); ok {
+			rec.biz = biz.String()
+		}
+		h(w, r, biz)
+	}
+}
 
 // CreateBusiness inserts a business with one API key and returns the plaintext key.
 // Only prefix and sha256(key) are stored; the key is high-entropy, so a fast hash is enough.

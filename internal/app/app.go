@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -48,6 +49,15 @@ func Migrate(dbURL string) error {
 
 func (a *App) Routes() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /customers", a.authed(a.createCustomer))
+	mux.HandleFunc("GET /customers/{id}", a.authed(a.getCustomer))
+	mux.HandleFunc("GET /customers", a.authed(a.listCustomers))
+	mux.HandleFunc("POST /invoices", a.authed(a.createInvoice))
+	mux.HandleFunc("GET /invoices/{id}", a.authed(a.getInvoiceHandler))
+	mux.HandleFunc("GET /invoices", a.authed(a.listInvoices))
+	mux.HandleFunc("POST /invoices/{id}/finalize", a.authed(a.finalizeInvoice))
+	mux.HandleFunc("POST /invoices/{id}/void", a.authed(a.voidInvoice))
+	mux.HandleFunc("POST /invoices/{id}/mark-uncollectible", a.authed(a.markUncollectible))
 	return a.logRequests(mux)
 }
 
@@ -71,6 +81,30 @@ func (a *App) logRequests(next http.Handler) http.Handler {
 		a.log.Info("request", "method", r.Method, "path", r.URL.Path, "status", rec.status,
 			"latency_ms", time.Since(start).Milliseconds(), "business_id", rec.biz)
 	})
+}
+
+// decodeJSON reads a small JSON body. Unknown fields are ignored on purpose
+// (a client-supplied invoice "total" must be dropped, not rejected).
+func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(v); err != nil {
+		writeErr(w, http.StatusBadRequest, "validation_error", "invalid JSON body")
+		return false
+	}
+	return true
+}
+
+// listLimit parses ?limit= (default 50, capped at 100).
+func listLimit(w http.ResponseWriter, r *http.Request) (int, bool) {
+	s := r.URL.Query().Get("limit")
+	if s == "" {
+		return 50, true
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 1 {
+		writeErr(w, http.StatusBadRequest, "validation_error", "limit must be a positive integer")
+		return 0, false
+	}
+	return min(n, 100), true
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
