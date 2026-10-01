@@ -58,6 +58,7 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("POST /invoices/{id}/finalize", a.authed(a.finalizeInvoice))
 	mux.HandleFunc("POST /invoices/{id}/void", a.authed(a.voidInvoice))
 	mux.HandleFunc("POST /invoices/{id}/mark-uncollectible", a.authed(a.markUncollectible))
+	mux.HandleFunc("POST /invoices/{id}/pay", a.authed(a.pay))
 	return a.logRequests(mux)
 }
 
