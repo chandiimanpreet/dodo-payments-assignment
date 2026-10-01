@@ -6,18 +6,18 @@ Go (stdlib `net/http`, `pgx`) and PostgreSQL 16. Binaries: `api` (HTTP + webhook
 
 All money is `BIGINT` cents; there is no float in the money path. Every primary key is a **UUIDv7 generated in the app**: time-ordered, so index inserts append (unlike UUIDv4); not guessable and not a volume leak (unlike `BIGSERIAL`); and known before the insert, so it can be logged.
 
-| Table | Shape and indexes | Why this shape | At 100x |
-|---|---|---|---|
-| `businesses` | `id`, `name` | Tenant root | Unchanged |
-| `api_keys` | `business_id`, `prefix`, `key_hash` UNIQUE, `revoked_at` | Own table, so a business can hold several keys and revoke one | Cache hash → business for a few seconds |
-| `customers` | `business_id`, `name`, `email`; UNIQUE `(id, business_id)`; index `(business_id, created_at DESC)` | The composite unique is the target of the invoice FK | Cursor pagination |
-| `invoices` | `business_id`, `customer_id`, `state` (text + CHECK), `total_cents`, `due_date`; FK `(customer_id, business_id)`; index `(business_id, state, created_at DESC)` | The composite FK makes the database guarantee the customer belongs to the same business. The index serves list-by-state | Partition by time; archive terminal invoices |
-| `invoice_line_items` | `invoice_id`, `description`, `quantity`, `unit_amount_cents`, `amount_cents` | Rows rather than JSONB, so amounts are typed and CHECKed | Partition with invoices |
-| `payment_attempts` | `invoice_id`, `amount_cents`, `status`, `psp_ref`, `failure_code`; partial unique `(invoice_id) WHERE status='pending'` and `WHERE status='succeeded'` | One row per try is the payment history. The partial indexes make "one in flight, one success" a database invariant | Partition by time |
-| `idempotency_keys` | PK `(business_id, key)`, `fingerprint`, `status`, stored response | Scoped per business; stores the full response for replay | TTL and cleanup, or Redis |
-| `webhook_endpoints` | `business_id`, `url`, `secret` | Secret is plaintext because we sign with it | Encrypt with a KMS key |
-| `events` | `id`, `business_id`, `type`, `payload` | Immutable record; `id` is what receivers dedupe on | Partition by time; retention |
-| `webhook_deliveries` | `event_id`, `endpoint_id`, `status`, `attempt_count`, `next_attempt_at`; partial index `(next_attempt_at) WHERE status='pending'` | One row per (event, endpoint), so endpoints retry independently | Replace polling with a queue and dedicated workers |
+| Table | Shape | Indexes (besides the primary key) | Why this shape | At 100x |
+|---|---|---|---|---|
+| `businesses` | `id`, `name` | None | Tenant root; every other row needs an owner | Unchanged |
+| `api_keys` | `business_id`, `prefix`, `key_hash`, `revoked_at` | UNIQUE `(key_hash)`, the per-request lookup | Own table, so a business can hold several keys and revoke one | Cache hash → business for a few seconds |
+| `customers` | `business_id`, `name`, `email` | `(business_id, created_at DESC)` for lists; UNIQUE `(id, business_id)` | The composite unique is the target of the invoice FK | Cursor pagination |
+| `invoices` | `business_id`, `customer_id`, `state` (text + CHECK), `total_cents`, `due_date`; FK `(customer_id, business_id)` | `(business_id, state, created_at DESC)` for list-by-state | The composite FK makes the database guarantee the customer belongs to the same business | Partition by time; archive terminal invoices |
+| `invoice_line_items` | `invoice_id`, `description`, `quantity`, `unit_amount_cents`, `amount_cents` | `(invoice_id)` | Rows rather than JSONB, so amounts are typed and CHECKed | Partition with invoices |
+| `payment_attempts` | `invoice_id`, `amount_cents`, `status`, `psp_ref`, `failure_code` | Partial UNIQUE `(invoice_id) WHERE status='pending'`, and again `WHERE status='succeeded'` | One row per try is the payment history. The partial indexes make "one in flight, one success" a database invariant | Add a plain `(invoice_id)` index; partition by time |
+| `idempotency_keys` | `business_id`, `key`, `fingerprint`, `status`, stored response | Primary key `(business_id, key)` only | Scoped per business; stores the full response for replay | TTL and cleanup, or Redis |
+| `webhook_endpoints` | `business_id`, `url`, `secret` | None | Secret is plaintext because we sign with it | Encrypt with a KMS key; index `(business_id)` |
+| `events` | `business_id`, `type`, `payload` | None | Immutable record; `id` is what receivers dedupe on | Partition by time; retention |
+| `webhook_deliveries` | `event_id`, `endpoint_id`, `status`, `attempt_count`, `next_attempt_at` | Partial `(next_attempt_at) WHERE status='pending'`, the worker's due query | One row per (event, endpoint), so endpoints retry independently | Replace polling with a queue and dedicated workers |
 
 ## 2. Invoice State Machine
 
