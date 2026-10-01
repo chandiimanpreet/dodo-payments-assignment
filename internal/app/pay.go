@@ -53,7 +53,10 @@ func (a *App) pay(w http.ResponseWriter, r *http.Request, biz uuid.UUID) {
 	}
 
 	// 2. Idempotency, checked before the invoice state.
-	ctx := r.Context()
+	// From here the request runs to the end even if the client disconnects: a cancelled
+	// context during the claim commit could leave a pending attempt that nothing charges
+	// or finalizes, or a key stuck in_progress.
+	ctx := context.WithoutCancel(r.Context())
 	h := sha256.New()
 	fmt.Fprintf(h, "%s\n%s\n", r.Method, r.URL.Path)
 	h.Write(raw)
@@ -142,8 +145,8 @@ func (a *App) pay(w http.ResponseWriter, r *http.Request, biz uuid.UUID) {
 		status, body = pendingResponse(attemptID)
 	}
 
-	// 6. Store the response; WithoutCancel so a client disconnect can't leave the key in_progress.
-	body = a.completeKey(context.WithoutCancel(ctx), biz, key, status, body)
+	// 6. Store the response so the same key replays it.
+	body = a.completeKey(ctx, biz, key, status, body)
 	writeRaw(w, status, body)
 }
 
@@ -195,7 +198,7 @@ func (a *App) replayOrReject(w http.ResponseWriter, r *http.Request, biz uuid.UU
 }
 
 func (a *App) releaseKey(ctx context.Context, biz uuid.UUID, key string) {
-	if _, err := a.db.Exec(context.WithoutCancel(ctx), `DELETE FROM idempotency_keys WHERE business_id = $1 AND key = $2`, biz, key); err != nil {
+	if _, err := a.db.Exec(ctx, `DELETE FROM idempotency_keys WHERE business_id = $1 AND key = $2`, biz, key); err != nil {
 		a.log.Error("release idempotency key", "err", err)
 	}
 }
