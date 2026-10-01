@@ -55,7 +55,7 @@ Why not the alternatives:
 
 **(b) PSP timeout (`tok_timeout`).** The endpoint returns **202** with the `attempt_id` after 5 s. The attempt is `pending`; the invoice is OPEN but blocked. The background call completes at 30 s and marks the attempt `succeeded` and the invoice PAID. The caller finds out from `GET /invoices/{id}` (which lists attempts) or the `invoice.paid` webhook.
 
-**(c) PSP succeeds, service crashes before persisting.** The pending attempt was committed before the call, so it survives. A retry with the same key gets 409 `idempotency_request_in_progress`; a new key gets 409 `payment_in_progress`. Nothing calls the PSP again, so **no double charge**. The cost: the invoice stays blocked until it is reconciled against the PSP, which is not built (§7).
+**(c) PSP succeeds, service crashes before persisting.** The pending attempt was committed before the call, so it survives. A retry with the same key gets 409 `idempotency_request_in_progress` (or the stored 202, if the crash came after the handler had already answered); a new key gets 409 `payment_in_progress`. Nothing calls the PSP again, so **no double charge**. The cost: the invoice stays blocked until it is reconciled against the PSP, which is not built (§7).
 
 **(d) Same key, different body.** The key stores `sha256(method + path + body)`. A mismatch returns **422 `idempotency_key_reused`** and nothing runs. Including the path means reusing a key on a different invoice is also caught.
 
