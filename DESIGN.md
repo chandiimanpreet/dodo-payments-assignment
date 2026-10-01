@@ -8,13 +8,13 @@ All money is `BIGINT` cents; there is no float in the money path. Every primary 
 
 | Table | Shape | Indexes (besides the primary key) | Why this shape | At 100x |
 |---|---|---|---|---|
-| `businesses` | `id`, `name` | None | Tenant root; every other row needs an owner | Unchanged |
-| `api_keys` | `business_id`, `prefix`, `key_hash`, `revoked_at` | UNIQUE `(key_hash)`, the per-request lookup | Own table, so a business can hold several keys and revoke one | Cache hash → business for a few seconds |
+| `businesses` | `id`, `name` | None | Tenant root | Unchanged |
+| `api_keys` | `business_id`, `prefix`, `key_hash`, `revoked_at` | UNIQUE `(key_hash)`, the per-request lookup | Own table, so a business can hold several keys and revoke one | Cache hash → business briefly |
 | `customers` | `business_id`, `name`, `email` | `(business_id, created_at DESC)` for lists; UNIQUE `(id, business_id)` | The composite unique is the target of the invoice FK | Cursor pagination |
 | `invoices` | `business_id`, `customer_id`, `state` (text + CHECK), `total_cents`, `due_date`; FK `(customer_id, business_id)` | `(business_id, state, created_at DESC)` for list-by-state | The composite FK makes the database guarantee the customer belongs to the same business | Partition by time; archive terminal invoices |
 | `invoice_line_items` | `invoice_id`, `description`, `quantity`, `unit_amount_cents`, `amount_cents` | `(invoice_id)` | Rows rather than JSONB, so amounts are typed and CHECKed | Partition with invoices |
 | `payment_attempts` | `invoice_id`, `amount_cents`, `status`, `psp_ref`, `failure_code` | Partial UNIQUE `(invoice_id) WHERE status='pending'`, and again `WHERE status='succeeded'` | One row per try is the payment history. The partial indexes make "one in flight, one success" a database invariant | Add a plain `(invoice_id)` index; partition by time |
-| `idempotency_keys` | `business_id`, `key`, `fingerprint`, `status`, stored response | Primary key `(business_id, key)` only | Scoped per business; stores the full response for replay | TTL and cleanup, or Redis |
+| `idempotency_keys` | `business_id`, `key`, `fingerprint`, `status`, stored response | Primary key `(business_id, key)` | Scoped per business; stores the full response for replay | TTL and cleanup, or Redis |
 | `webhook_endpoints` | `business_id`, `url`, `secret` | None | Secret is plaintext because we sign with it | Encrypt with a KMS key; index `(business_id)` |
 | `events` | `business_id`, `type`, `payload` | None | Immutable record; `id` is what receivers dedupe on | Partition by time; retention |
 | `webhook_deliveries` | `event_id`, `endpoint_id`, `status`, `attempt_count`, `next_attempt_at` | Partial `(next_attempt_at) WHERE status='pending'`, the worker's due query | One row per (event, endpoint), so endpoints retry independently | Replace polling with a queue and dedicated workers |
@@ -24,19 +24,19 @@ All money is `BIGINT` cents; there is no float in the money path. Every primary 
 ```mermaid
 stateDiagram-v2
     [*] --> DRAFT: POST /invoices
-    DRAFT --> OPEN: POST /invoices/{id}/finalize
-    DRAFT --> VOID: POST /invoices/{id}/void
+    DRAFT --> OPEN: POST .../finalize
+    DRAFT --> VOID: POST .../void
     OPEN --> PAID: payment attempt succeeded
     OPEN --> OPEN: payment attempt failed
-    OPEN --> VOID: POST /invoices/{id}/void
-    OPEN --> UNCOLLECTIBLE: POST /invoices/{id}/mark-uncollectible
+    OPEN --> VOID: POST .../void
+    OPEN --> UNCOLLECTIBLE: POST .../mark-uncollectible
     PAID --> [*]
     VOID --> [*]
     UNCOLLECTIBLE --> [*]
 ```
 
 - **Terminal:** PAID, VOID, UNCOLLECTIBLE. **No transition is reversible.**
-- Only an OPEN invoice can be paid. A failed payment leaves it OPEN so it can be tried again.
+- DRAFT lets an invoice be prepared before it is payable. Only an OPEN invoice can be paid, and a failed payment leaves it OPEN so it can be tried again.
 - There is no `PROCESSING` invoice state. "A payment is in flight" lives on the payment attempt (`pending`, `succeeded`, `failed`), so the invoice has no state it could get stranded in.
 - **Rejecting invalid transitions:** each transition is `UPDATE … WHERE id=$1 AND business_id=$2 AND state = ANY($allowed) RETURNING …`. Zero rows means 404 if the invoice doesn't exist, otherwise **409 `invalid_state_transition`** naming the current state.
 - Void and mark-uncollectible return 409 `payment_in_progress` while an attempt is pending. They lock the invoice row first (`SELECT … FOR UPDATE`), then check for the attempt. A single `UPDATE … AND NOT EXISTS (…)` would use a stale snapshot under READ COMMITTED and miss an attempt `/pay` just committed.
@@ -51,17 +51,17 @@ Why not the alternatives:
 - **Serializable isolation:** needs retry loops and still cannot cover the PSP call.
 - **A version column:** guards the state change, not the number of PSP calls.
 
-**(a) Two simultaneous `/pay` calls.** Both reach the claim. The row lock serialises them; the first inserts the pending attempt, and the second hits the unique index and gets 409 `payment_in_progress` (or 409 `invalid_state_transition` if it arrives after PAID). One PSP call, one charge.
+**(a) Two simultaneous `/pay` calls.** The row lock serialises the two claims. The first inserts the pending attempt; the second hits the unique index and gets 409 `payment_in_progress` (or 409 `invalid_state_transition` if it arrives after PAID). One PSP call, one charge.
 
 **(b) PSP timeout (`tok_timeout`).** The endpoint returns **202** with the `attempt_id` after 5 s. The attempt is `pending`; the invoice is OPEN but blocked. The background call completes at 30 s and marks the attempt `succeeded` and the invoice PAID. The caller finds out from `GET /invoices/{id}` (which lists attempts) or the `invoice.paid` webhook.
 
-**(c) PSP succeeds, service crashes before persisting.** The pending attempt was committed before the call, so it survives. A retry with the same key gets 409 `idempotency_request_in_progress` (or the stored 202, if the crash came after the handler had already answered); a new key gets 409 `payment_in_progress`. Nothing calls the PSP again, so **no double charge**. The cost: the invoice stays blocked until it is reconciled against the PSP, which is not built (§7).
+**(c) PSP succeeds, service crashes before persisting.** The pending attempt was committed before the call, so it survives. A retry with the same key gets 409 `idempotency_request_in_progress` (or the stored 202, if the handler had already answered); a new key gets 409 `payment_in_progress`. Nothing calls the PSP again, so **no double charge**. The cost: the invoice stays blocked until it is reconciled against the PSP, which is not built (§7).
 
-**(d) Same key, different body.** The key stores `sha256(method + path + body)`. A mismatch returns **422 `idempotency_key_reused`** and nothing runs. Including the path means reusing a key on a different invoice is also caught.
+**(d) Same key, different body.** The key stores `sha256(method + path + body)`. A mismatch returns **422 `idempotency_key_reused`** and nothing runs. Because the path is included, reusing a key on a different invoice is caught too.
 
 **(e) `/pay` on a PAID invoice.** The claim's `WHERE state='OPEN'` matches nothing: **409 `invalid_state_transition`**, no attempt, no PSP call. The original request's key replays its stored 200.
 
-**PSP errors (`tok_network_error`).** A 5xx or a dropped or refused connection marks the attempt `failed` (`psp_unavailable`); the endpoint returns 502 and the invoice stays OPEN and payable with a new key. Trade-off: with a real PSP, a dropped connection can hide a charge that went through, so releasing could double-charge. The mock cannot produce that case. In production I would send the PSP an idempotency key and confirm with a status lookup before releasing. With **no evidence at all** (a crash, or no answer in 40 s), the invoice stays blocked instead.
+**PSP errors (`tok_network_error`).** A 5xx or a dropped or refused connection fails the attempt (`psp_unavailable`); the endpoint returns 502 and the invoice stays OPEN, payable with a new key. Trade-off: a real PSP could have charged before the connection dropped, so releasing risks a double charge. The mock cannot produce that; in production I would send the PSP an idempotency key and confirm by status lookup before releasing. With **no evidence at all** (a crash, or 40 s of silence) the invoice stays blocked.
 
 ## 4. Webhook Design
 
@@ -74,8 +74,8 @@ Why not the alternatives:
 
 ## 5. API Key Model
 
-- **Generation:** `sk_<8-char prefix>_<32+ random chars>` from `crypto/rand`.
-- **Storage:** the prefix (to identify a key in logs) plus SHA-256 of the full key. The plaintext is shown once. SHA-256 rather than bcrypt because the key is high-entropy random, so brute force is infeasible and a slow hash would only add latency to every request.
+- **Generation:** `sk_` + 8 hex characters + `_` + 32 hex characters (128 random bits), from `crypto/rand`.
+- **Storage:** the prefix (to identify a key in logs) plus SHA-256 of the full key; the plaintext is shown once. SHA-256 rather than bcrypt because the key is high-entropy random: brute force is infeasible, and a slow hash would only add latency to every request.
 - **Transmission:** `Authorization: Bearer <key>`, over TLS in production.
 - **Revocation:** `revoked_at` is checked in the lookup on every request, so it is immediate. There is no endpoint; it is a SQL update today.
 - **Rotation:** the schema allows several keys per business: issue a new one, switch over, revoke the old one. Not built.
@@ -84,12 +84,12 @@ Why not the alternatives:
 ## 6. What I Cut and Why
 
 1. **Key rotation and revocation endpoints.** The schema supports them; the endpoints are admin surface the brief doesn't ask for.
-2. **PSP idempotency keys, status lookup and a reconciler.** They need the mock extended beyond the given spec, so I kept it to spec and block the invoice when the outcome is unknown.
+2. **PSP idempotency keys, status lookup and a reconciler.** This is the one I most wanted to build. It needs the mock extended beyond the given spec, so I kept the mock to spec and block the invoice when the outcome is unknown.
 3. **Webhook replay endpoint.** The invoice API already covers reconciliation.
 4. **Reopening UNCOLLECTIBLE** (to PAID or VOID). Terminal is simpler to reason about.
 5. **Cursor pagination.** Lists take `limit` only.
 
-Also not built, per the brief: **refunds and partial payments** (a `refunds` table against a succeeded attempt, plus an amount-paid column and a partially-paid state), **rate limiting** (a per-key token bucket returning 429), and idempotency-key expiry.
+Also not built, per the brief: **refunds and partial payments** (a `refunds` table against a succeeded attempt, plus an amount-paid column and a partially-paid state), **rate limiting** (a per-key token bucket in Redis returning 429 with `Retry-After`, tighter on `/pay`), and idempotency-key expiry.
 
 ## 7. Production Readiness Gap
 
