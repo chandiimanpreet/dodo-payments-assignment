@@ -181,4 +181,7 @@ Rust would give stronger compile-time guarantees and no garbage collector. For a
 
 ## Demo Video
 
-_The link will be added here once the recording is uploaded._
+The walkthrough is in two parts. Both open without a login.
+
+1. [Part 1](https://drive.google.com/file/d/1-W4th1kGf8u43yFhK0aPtneAANcGSwV8/view?usp=sharing)
+2. [Part 2](https://drive.google.com/file/d/10m8yWCwrL_gxJzdsDxLXyNZ_dMbPOyFI/view?usp=sharing)
